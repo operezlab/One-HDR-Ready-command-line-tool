@@ -2,6 +2,7 @@ import requests, sys, subprocess, csv,time
 import pandas as pd
 from Bio.Seq import Seq
 
+
 # Function to get the reverse complement of a DNA sequence
 def reverse_complement(seq):
     complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
@@ -21,92 +22,85 @@ def check_id_mapping_results(job_id):
     response.raise_for_status()
     return response.json()
 
+# Function to convert a single Ensembl ID using a GET request
+def convert_single_id(ensembl_id):
+    url = f"https://biotools.fr/human/ensembl_symbol_converter/?api=1&id={ensembl_id}"
+    response = requests.get(url)
+    return response.json()
+
+# Function to convert multiple Ensembl IDs using a POST request
+def convert_multiple_ids(ensembl_ids):
+    url = "https://biotools.fr/human/ensembl_symbol_converter/"
+    ids_json = json.dumps(ensembl_ids)
+    body = {'api': 1, 'ids': ids_json}
+    response = requests.post(url, data=body)
+    return response.json()
+
 # Get the Gene IDs from user input
-gene_ids = input("Enter the Gene IDs (comma-separated): ")
+def main(gene_ids):
+    print(f"Received Gene IDs: {gene_ids}", flush = True)
+    print("Processing CRISPR data...", flush = True)
 
-# Initiate ID mapping from GeneCards to UniProtKB
-job_id = initiate_id_mapping(gene_ids, "GeneCards", "UniProtKB")
-print(f"Job ID: {job_id}")
+    job_id = initiate_id_mapping(gene_ids, "GeneCards", "UniProtKB")
+    print(f"Job ID: {job_id}")
 
-# Poll the UniProt API for the results
-while True:
-    results = check_id_mapping_results(job_id)
-    if "results" in results:
-        break
-    print("Waiting for results...")
-    time.sleep(5)
+    while True:
+        results = check_id_mapping_results(job_id)
+        if "results" in results:
+            break
+        print("Waiting for results...")
+        time.sleep(5)
 
-# Extract UniProt accession codes
-uniprot_accession_codes = [result["to"] for result in results["results"]]
+    uniprot_accession_codes = [result["to"] for result in results["results"]]
+    print("UniProt Accession Codes:", uniprot_accession_codes)
 
-print("UniProt Accession Codes:", uniprot_accession_codes)
+    if uniprot_accession_codes:
+        requestURL = f"https://www.ebi.ac.uk/proteins/api/coordinates/{uniprot_accession_codes[0]}"
+        r = requests.get(requestURL, headers={"Accept": "application/json"})
+        if not r.ok:
+            r.raise_for_status()
+            sys.exit()
 
-# For simplicity, we'll use the first UniProt accession code
-if uniprot_accession_codes:
-    uniprot_accession_code = uniprot_accession_codes[0]
-else:
-    print("No UniProt accession codes found.")
-    sys.exit()
+        response_data = r.json()
+        relevant_info = []
+        for gene in response_data.get("gnCoordinate", []):
+            ensembl_gene_id = gene.get("ensemblGeneId")
+            genomic_location = gene.get("genomicLocation", {}) 
+            if "exon" in genomic_location:
+                for exon in genomic_location["exon"]:
+                    exon_id = exon.get("id")
+                    chromosome = genomic_location.get("chromosome")
+                    start = exon.get("genomeLocation", {}).get("begin", {}).get("position")
+                    end = exon.get("genomeLocation", {}).get("end", {}).get("position")
+                    relevant_info.append({
+                        "ensembl_gene_id": ensembl_gene_id,
+                        "exon_id": exon_id,
+                        "chromosome": chromosome,
+                        "start": start,
+                        "end": end
+                    })
 
-# Function to get the reverse complement of a DNA sequence
-def reverse_complement(seq):
-    complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
-    return ''.join(complement[base] for base in reversed(seq))
 
-# Define the URL for fetching exon coordinates
-requestURL = f"https://www.ebi.ac.uk/proteins/api/coordinates/{uniprot_accession_code}"
 
-r = requests.get(requestURL, headers={"Accept": "application/json"})
+        if relevant_info:
+            last_exon_info = max(relevant_info, key=lambda x: x['start'])
+            print("Last exon information:")
+            print(last_exon_info)
+            return last_exon_info  # Returning only the last exon information
+        else:
+            print("No relevant exon information found for valid gene IDs.")
+            return None
+    else:
+        print("No UniProt accession codes found.")
+        return None
 
-if not r.ok:
-    r.raise_for_status()
-    sys.exit()
 
-response_data = r.json()
-
-# Extract relevant information from each gene
-relevant_info = []
-
-for gene in response_data.get("gnCoordinate", []):
-    ensembl_gene_id = gene.get("ensemblGeneId")
-    genomic_location = gene.get("genomicLocation", {}) 
-
-    if "exon" in genomic_location:
-        for exon in genomic_location["exon"]:
-            exon_id = exon.get("id")
-            chromosome = genomic_location.get("chromosome")
-            start = exon.get("genomeLocation", {}).get("begin", {}).get("position")
-            end = exon.get("genomeLocation", {}).get("end", {}).get("position")
-            relevant_info.append({
-                "ensembl_gene_id": ensembl_gene_id,
-                "exon_id": exon_id,
-                "chromosome": chromosome,
-                "start": start,
-                "end": end
-            })
-
-# Filter relevant_info based on the extracted Ensembl gene ID
-if relevant_info:
-    ensembl_gene_id = relevant_info[0]['ensembl_gene_id']
-    filtered_relevant_info = [info for info in relevant_info if info['ensembl_gene_id'] == ensembl_gene_id]
-
-    # Print the filtered relevant information for debugging
-    print("Filtered relevant information:")
-    for info in filtered_relevant_info:
-        print(info)
-
-    # Label each exon with a sequential identifier
-    for idx, info in enumerate(filtered_relevant_info, start=1):
-        info['label'] = idx
-
-    # Find the exon with the highest label
-    last_exon_info = max(filtered_relevant_info, key=lambda x: x['label'])
-
-    # Print the last exon information for debugging
-    print("Last exon information:")
-    print(last_exon_info)
-else:
-    print("No relevant exon information found.")
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        gene_ids = sys.argv[1]
+    else:
+        gene_ids = input("Enter the Gene IDs (comma-separated): ")
+    last_exon_info = main(gene_ids)
 
 # Fetch the DNA sequence for the last exon
 if last_exon_info:
@@ -129,11 +123,12 @@ if last_exon_info:
     
     headers = {"Content-Type": "application/json"}
     r = requests.get(ensembl_server + ext, headers=headers)
-    
+
+
     if not r.ok:
         r.raise_for_status()
         sys.exit()
-
+ 
     dna_sequence = r.json().get("seq")
     
     # If the start is greater than the end, print the reverse complement of the extended DNA sequence
@@ -277,10 +272,10 @@ if last_exon_info:
 
 print(CRISPRtgSearch)
 
-
 with open("sequence.fa", "w") as fa_file:
-            fa_file.write(f">{uniprot_accession_code}_whole\n")
+            fa_file.write(f">{gene_ids}_whole\n")
             fa_file.write(CRISPRtgSearch + "\n")
+
 
 # Define the command and arguments
 discover_command = [
@@ -297,7 +292,7 @@ score_command = [
     'score', 
     '--input', 'CRISPRtg.output', 
     '--output', 'CRISPRtg.output.scored.tsv', 
-    '--scoringMetrics', 'doench2014ontarget,doench2016cfd,dangerous,hsu2013,minot,moreno2015', 
+    '--scoringMetrics', 'doench2014ontarget,doench2016cfd,dangerous,hsu2013,minot,moreno2015,rank', 
     '--database', 'GRCh38_cas9ngg_database'
 ]
 
@@ -342,7 +337,7 @@ def calculate_distance(row):
     else:
         # Reverse complement the target sequence if orientation is RVS
         segment = str(Seq(target_seq).reverse_complement())
-    
+
     if last_exon_info['end'] < last_exon_info['start']:
         rvs_seq = reverse_complement_exon[-15:]
         last_exon_position = reverse_complement_CRISPRi.rfind(rvs_seq)
@@ -369,74 +364,81 @@ def calculate_distance(row):
         distance = target_position - last_letter_position + 16
     else:
         distance = target_position - last_letter_position + 5
-        #if distance < 0:
-            #distance = distance - 1
     print(distance)
     return distance
 
-if last_exon_info['end'] < last_exon_info['start']:
-        rvs_seq = reverse_complement_exon[-15:]
-        print(rvs_seq)
-        last_exon_position = reverse_complement_CRISPRi.rfind(rvs_seq)
-        last_letter_position = last_exon_position + len(rvs_seq) - 1
-else:
-        fwd_seq = exon_dna_sequence[-15:]
-        print(fwd_seq)
-        last_exon_position = whole_dna_sequence.rfind(fwd_seq)
-        last_letter_position = last_exon_position + len(fwd_seq) - 1
 
+if last_exon_info['end'] < last_exon_info['start']:
+    rvs_seq = reverse_complement_exon[-15:]
+    print(rvs_seq)
+    last_exon_position = reverse_complement_CRISPRi.rfind(rvs_seq)
+    last_letter_position = last_exon_position + len(rvs_seq) - 1
+else:
+    fwd_seq = exon_dna_sequence[-15:]
+    print(fwd_seq)
+    last_exon_position = whole_dna_sequence.rfind(fwd_seq)
+    last_letter_position = last_exon_position + len(fwd_seq) - 1
 
 # Print the positions for debugging
 print("Last exon sequence position in whole DNA sequence:", last_exon_position)
 print("Last letter position of exon sequence:", last_letter_position)
 print("CRISPR Search Input Seq", whole_dna_sequence)
 
-
 try:
     df = pd.read_csv('CRISPRtg.output.scored.tsv', sep='\t')
     print("DataFrame loaded successfully:")
     print(df.head())
-    
+
     df['Distance from Exon'] = df.apply(calculate_distance, axis=1)
 
-    # Sort the DataFrame based on the specified criteria and keep only the top 5 entries
-    df['Distance from Exon'] = df.apply(calculate_distance, axis=1)
+    # Multiply the scores by 100
+    columns_to_multiply = [
+        'Doench2014OnTarget',
+        'DoenchCFD_maxOT',
+        'DoenchCFD_specificityscore',
+        'Moreno-Mateos2015OnTarget'
+    ]
 
-    # Sort the DataFrame based on the specified criteria and keep only the top entries based on scores and distance
-    filtered_df = df.sort_values(
-        by=[
-            'Hsu2013',  # Higher is better
-            'DoenchCFD_maxOT',  # Lower is better
-            'DoenchCFD_specificityscore',  # Higher is better
-            'Moreno-Mateos2015OnTarget',  # Higher is better
-            'Doench2014OnTarget',  # Higher is better
-            'Distance from Exon'  # Closer to zero is better
-        ],
-        ascending=[False, True, False, False, False, True]  # Specify the sort order for each column
-    ).head(20)
-    
-    filtered_df = filtered_df.iloc[filtered_df['Distance from Exon'].abs().argsort()[:20]]
+    for col in columns_to_multiply:
+        df[col] = df[col] * 100
+
+    # Format the scores to three significant figures
+    score_columns = [
+        'Doench2014OnTarget',
+        'DoenchCFD_maxOT',
+        'DoenchCFD_specificityscore',
+        'Hsu2013',
+        'Moreno-Mateos2015OnTarget'
+    ]
+
+    for col in score_columns:
+        df[col] = df[col].apply(lambda x: f"{x:.3g}")
+
+    # Remove any rows where the absolute value of 'Distance from Exon' is greater than 23
+    df = df[df['Distance from Exon'].abs() <= 23]
+
+    # Keep only the top 20 entries without sorting
+    filtered_df = df.head(20)
 
     # Select the specified columns
     selected_columns = [
-        'target', 
-        'orientation', 
-        'Doench2014OnTarget', 
-        'DoenchCFD_maxOT', 
-        'DoenchCFD_specificityscore', 
+        'target',
+        'orientation',
+        'Doench2014OnTarget',
+        'DoenchCFD_maxOT',
+        'DoenchCFD_specificityscore',
         'Hsu2013',
         'Moreno-Mateos2015OnTarget',
         'Distance from Exon'
-        
     ]
     filtered_df = filtered_df[selected_columns]
-    
+
     # Print the DataFrame with the new column
     print(filtered_df[selected_columns])
 
     # Save the filtered DataFrame to a CSV file
-    filtered_df.to_csv(f'{uniprot_accession_code}_CRISPR_tgts.csv', index=False)
-    print(f"Filtered DataFrame saved to filtered_crispr_data.csv {uniprot_accession_code}_CRISPR_tgts.csv")
+    filtered_df.to_csv(f'{gene_ids}_CRISPR_tgts.csv', index=False)
+    print(f"Filtered DataFrame saved to filtered_crispr_data.csv {gene_ids}_CRISPR_tgts.csv")
 
     # Optionally, save the filtered DataFrame to an Excel file
     #filtered_df.to_excel('filtered_crispr_data.xlsx', index=False)
