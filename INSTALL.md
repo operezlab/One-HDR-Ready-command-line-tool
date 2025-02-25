@@ -9,8 +9,10 @@ Required Python libraries for the tool: requests, pandas and biopython which can
 ```
 pip install requests pandas biopython
 ```
+Third Step:
 The tool uses crispor to generate sgRNA sequences and can be installed here https://github.com/maximilianh/crisporWebsite/blob/master/INSTALL.md
 
+Final Step:
 Once crispor is installed the program can be run and enter the gene of interest
 ```
 python3 CRISPR-Webtool.py
