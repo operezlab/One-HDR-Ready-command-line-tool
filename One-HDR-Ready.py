@@ -1,8 +1,11 @@
-import requests, sys, subprocess, csv,time, os
+#!/usr/bin/env python3
+
+import requests, sys, subprocess, csv,time, os, tempfile, json
 import pandas as pd
 from Bio.Seq import Seq
-from Bio.Data import CodonTable
-
+from Bio.Data import CodonTable     
+import primer3
+from pathlib import Path
 
 # Function to get the reverse complement of a DNA sequence
 def reverse_complement(seq):
@@ -15,6 +18,7 @@ def initiate_id_mapping(ids, from_db, to_db):
     response = requests.post(url, data={'ids': ids, 'from': from_db, 'to': to_db})
     response.raise_for_status()
     return response.json()["jobId"]
+    time.sleep(1)
 
 # Function to check ID mapping results
 def check_id_mapping_results(job_id):
@@ -44,7 +48,7 @@ def main(gene_ids):
 
     job_id = initiate_id_mapping(gene_ids, "GeneCards", "UniProtKB")
     print(f"Job ID: {job_id}")
-    time.sleep(5)
+    time.sleep(1)
 
     while True:
         results = check_id_mapping_results(job_id)
@@ -68,34 +72,32 @@ def main(gene_ids):
 
         # Debugging: Print entire API response
         #print("API Response Data:", response_data)
+        valid_human_chromosomes = {str(i) for i in range(1, 23)} | {"X", "Y"}
 
         for gene in response_data.get("gnCoordinate", []):
             ensembl_gene_id = gene.get("ensemblGeneId")
             genomic_location = gene.get("genomicLocation", {})
-            #print("Genomic Location:", genomic_location)  # Debugging
 
             if "exon" in genomic_location:
-                #print("Exons Found:", genomic_location["exon"])  # Debugging
-
                 for exon in genomic_location["exon"]:
-                    #print("Processing Exon:", exon)  # Debugging
                     exon_id = exon.get("id")
-                    chromosome = genomic_location.get("chromosome")
+                    chromosome = str(genomic_location.get("chromosome"))  # Convert to string for comparison
                     start = exon.get("genomeLocation", {}).get("begin", {}).get("position")
                     end = exon.get("genomeLocation", {}).get("end", {}).get("position")
 
-                    # Debugging Start and End Positions
-                    #print(f"Exon ID: {exon_id}, Start: {start}, End: {end}")
-
-                    # Ensuring valid start and end positions
-                    if start is not None and end is not None:
-                        relevant_info.append({
-                            "ensembl_gene_id": ensembl_gene_id,
-                            "exon_id": exon_id,
-                            "chromosome": chromosome,
-                            "start": start,
-                            "end": end
-                        })
+                    # Ensure chromosome is valid
+                    if chromosome in valid_human_chromosomes:
+                        #print(f"Valid chromosome found: {chromosome}")
+                        if start is not None and end is not None:
+                            relevant_info.append({
+                                "ensembl_gene_id": ensembl_gene_id,
+                                "exon_id": exon_id,
+                                "chromosome": chromosome,
+                                "start": start,
+                                "end": end
+                            })
+                    else:
+                        print(f"Skipping invalid chromosome: {chromosome}")
 
         if relevant_info:
             # Determine the last exon based on strand orientation
@@ -125,6 +127,224 @@ def main(gene_ids):
         print("No UniProt accession codes found.")
         return None
 
+# ---------- small utils ----------
+def rc(seq: str) -> str:
+    t = str.maketrans("ACGTacgtNn", "TGCAtgcaNn")
+    return seq.translate(t)[::-1]
+
+def _run(cmd):
+    cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if cp.returncode != 0:
+        raise RuntimeError(f"Command failed:\n{' '.join(cmd)}\n{cp.stderr}")
+    return cp.stdout
+
+def nw_global(q: str, s: str, match=1, mismatch=-1, gap=-1):
+    n, m = len(q), len(s)
+    dp = [[0]*(m+1) for _ in range(n+1)]
+    tb = [[None]*(m+1) for _ in range(n+1)]
+    for i in range(1, n+1): dp[i][0]=i*gap; tb[i][0]='u'
+    for j in range(1, m+1): dp[0][j]=j*gap; tb[0][j]='l'
+    for i in range(1, n+1):
+        for j in range(1, m+1):
+            sc = match if q[i-1]==s[j-1] else mismatch
+            diag=dp[i-1][j-1]+sc; up=dp[i-1][j]+gap; left=dp[i][j-1]+gap
+            best = max(diag, up, left)
+            dp[i][j]=best; tb[i][j]='d' if best==diag else ('u' if best==up else 'l')
+    i, j = n, m
+    aq, as_ = [], []
+    while i>0 or j>0:
+        mv = tb[i][j]
+        if mv=='d': aq.append(q[i-1]); as_.append(s[j-1]); i-=1; j-=1
+        elif mv=='u': aq.append(q[i-1]); as_.append('-'); i-=1
+        else: aq.append('-'); as_.append(s[j-1]); j-=1
+    aq.reverse(); as_.reverse()
+    return dp[n][m], ''.join(aq), ''.join(as_)
+
+def build_db_from_template(template_seq: str, workdir: Path):
+    fa = workdir / "template.fa"
+    fa.write_text(">TEMPLATE\n" + template_seq + "\n")
+    db_prefix = str(workdir / "template_db")
+    _run(["makeblastdb", "-dbtype", "nucl", "-parse_seqids", "-in", str(fa), "-out", db_prefix])
+    return db_prefix
+
+def blast_hits_for(primer_seq: str, db_prefix: str):
+    with tempfile.TemporaryDirectory() as td:
+        qf = Path(td) / "q.fa"
+        qf.write_text(">q\n"+primer_seq+"\n")
+        out = _run([
+            "blastn","-task","blastn-short","-db",db_prefix,"-query",str(qf),
+            "-strand","both","-evalue","30000","-word_size","7",
+            "-reward","1","-penalty","-1","-soft_masking","false","-dust","no",
+            "-max_target_seqs","50000","-max_hsps","1",
+            "-outfmt","6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send sstrand"
+        ])
+    hits=[]
+    for line in out.strip().splitlines():
+        qseqid,sseqid,pident,length,mismatch,gapopen,qstart,qend,sstart,send,sstrand = line.split("\t")
+        sstart=int(sstart); send=int(send); start,end=(sstart,send) if sstart<=send else (send,sstart)
+        hits.append({
+            "sseqid":sseqid,"pident":float(pident),"length":int(length),
+            "mismatch":int(mismatch),"gapopen":int(gapopen),
+            "qstart":int(qstart),"qend":int(qend),
+            "sstart":sstart,"send":send,"start":start,"end":end,"sstrand":sstrand
+        })
+    return hits
+
+def verify_hit(primer_seq: str, hit: dict, template_seq: str, min_perfect_3prime=15,
+               nw_mismatch=-1, nw_gap=-1):
+    # subject slice (1-based to 0-based)
+    s_lo = min(hit["sstart"], hit["send"]) - 1
+    s_hi = max(hit["sstart"], hit["send"])
+    subj = template_seq[s_lo:s_hi]
+    subj_oriented = subj if hit["sstrand"]=="plus" else rc(subj)
+    _, aq, as_ = nw_global(primer_seq, subj_oriented, match=1, mismatch=nw_mismatch, gap=nw_gap)
+    # 3' perfect window:
+    n_ok=0; i=len(aq)-1
+    while i>=0 and n_ok<min_perfect_3prime:
+        if aq[i] != '-':
+            if as_[i]=='-' or aq[i]!=as_[i]: return None
+            n_ok+=1
+        i-=1
+    mism = sum(1 for a,b in zip(aq,as_) if a!='-' and b!='-' and a!=b)
+    ident = 1.0 - mism/len(primer_seq)
+    return {**hit, "nw_mismatch":mism, "nw_identity":ident}
+
+# ---------- ranking pipeline ----------
+def rank_primer_pairs_with_specificity(
+    res: dict,
+    template_seq: str,
+    size_range=(1400,1500),
+    min_perfect_3prime=15,
+    min_identity=0.65,  # allow up to ~35% mismatches
+    weights=None,
+    top_k=3
+):
+    """
+    Combine Primer3 quality + BLAST/NW specificity to score each pair.
+    Returns a sorted list (best first).
+    """
+    if weights is None:
+        weights = {
+            "offtarget_pair": 1000.0,
+            "single_primer_amp": 200.0,
+            "compl_any": 1.0,      # per unit TH
+            "compl_end": 2.0,      # per unit TH
+            "left_self_end": 1.0,  # per unit TH
+            "right_self_end": 1.0  # per unit TH
+        }
+
+    # Prep BLAST DB
+    with tempfile.TemporaryDirectory() as td:
+        db_prefix = build_db_from_template(template_seq, Path(td))
+        # cache BLAST hits per unique primer
+        cache = {}
+
+        def get_hits_checked(primer_seq: str, expect_strand: str):
+            if primer_seq not in cache:
+                cache[primer_seq] = blast_hits_for(primer_seq, db_prefix)
+            # keep only hits in expected binding orientation for pairing
+            raw = [h for h in cache[primer_seq] if h["sstrand"] == expect_strand]
+            ok = []
+            for h in raw:
+                vh = verify_hit(primer_seq, h, template_seq, min_perfect_3prime=min_perfect_3prime)
+                if vh and vh["nw_identity"] >= min_identity:
+                    ok.append(vh)
+            return ok, cache[primer_seq]  # ok (filtered), raw (for single-primer check)
+
+        results = []
+        n_pairs = int(res.get("PRIMER_PAIR_NUM_RETURNED", 0) or 0)
+        for i in range(n_pairs):
+            Lseq = res[f"PRIMER_LEFT_{i}_SEQUENCE"]
+            Rseq = res[f"PRIMER_RIGHT_{i}_SEQUENCE"]
+            Lpos = res[f"PRIMER_LEFT_{i}"]   # [start, length]
+            Rpos = res[f"PRIMER_RIGHT_{i}"]  # [3' end idx, length]
+            prod_size = res.get(f"PRIMER_PAIR_{i}_PRODUCT_SIZE")
+            p3_penalty = float(res.get(f"PRIMER_PAIR_{i}_PENALTY", 0.0) or 0.0)
+
+            # BLAST+ + NW verified hits for pairing
+            L_ok, L_raw = get_hits_checked(Lseq, expect_strand="plus")
+            R_ok, R_raw = get_hits_checked(Rseq, expect_strand="minus")
+
+            # pair amplicons in window
+            lo, hi = size_range
+            pair_amps=[]
+            for L in L_ok:
+                for R in R_ok:
+                    if L["sseqid"]!=R["sseqid"]: continue
+                    start=min(L["start"], R["start"]); end=max(L["end"], R["end"])
+                    size=end-start+1
+                    if lo<=size<=hi and L["start"]<R["end"]:
+                        pair_amps.append({
+                            "size":size, "left":L, "right":R
+                        })
+
+            # define on-target as any amplicon whose size == Primer3 product_size (±3 bp tolerance)
+            on_target = [a for a in pair_amps if prod_size and abs(a["size"]-prod_size)<=3]
+            off_target_pairs = max(0, len(pair_amps) - len(on_target))
+
+            # single-primer amplicons (same primer binds + and -)
+            def single_amp_count(raw_hits):
+                plus=[h for h in raw_hits if h["sstrand"]=="plus"]
+                minus=[h for h in raw_hits if h["sstrand"]=="minus"]
+                cnt=0
+                for P in plus:
+                    for M in minus:
+                        if P["sseqid"]!=M["sseqid"]: continue
+                        start=min(P["start"], M["start"]); end=max(P["end"], M["end"])
+                        size=end-start+1
+                        if lo<=size<=hi and P["start"]<M["end"]:
+                            cnt+=1
+                return cnt
+            single_left = single_amp_count(L_raw)
+            single_right= single_amp_count(R_raw)
+            single_total = single_left + single_right
+
+            # add soft penalties for thermodynamic risks (Primer3 metrics)
+            compl_any = float(res.get(f"PRIMER_PAIR_{i}_COMPL_ANY_TH", 0.0) or 0.0)
+            compl_end = float(res.get(f"PRIMER_PAIR_{i}_COMPL_END_TH", 0.0) or 0.0)
+            left_self_end  = float(res.get(f"PRIMER_LEFT_{i}_SELF_END_TH", 0.0) or 0.0)
+            right_self_end = float(res.get(f"PRIMER_RIGHT_{i}_SELF_END_TH", 0.0) or 0.0)
+
+            score = (
+                p3_penalty +
+                weights["offtarget_pair"] * off_target_pairs +
+                weights["single_primer_amp"] * single_total +
+                weights["compl_any"] * compl_any +
+                weights["compl_end"] * compl_end +
+                weights["left_self_end"]  * left_self_end +
+                weights["right_self_end"] * right_self_end
+            )
+
+            results.append({
+                "rank": i,
+                "left_seq": Lseq,
+                "right_seq": Rseq,
+                "product_size": prod_size,
+                "primer3_penalty": p3_penalty,
+                "offtarget_pairs": off_target_pairs,
+                "single_primer_amps": single_total,
+                "compl_any_th": compl_any,
+                "compl_end_th": compl_end,
+                "score": round(score, 3),
+                "pair_amps_found": len(pair_amps),
+                "on_target_found": len(on_target) > 0
+            })
+
+    # sort best first (lowest score wins)
+    results.sort(key=lambda r: (r["score"], r["primer3_penalty"]))
+    best = results[:top_k]
+
+    # pretty print
+    print("Best primer pairs (combined quality + specificity):")
+    for j, r in enumerate(best, 1):
+        print(f"{j}. P3rank={r['rank']}  score={r['score']}  size={r['product_size']}  "
+              f"off-target pairs={r['offtarget_pairs']}  single-amps={r['single_primer_amps']}  "
+              f"on-target={'yes' if r['on_target_found'] else 'no'}")
+        print(f"   L: {r['left_seq']}")
+        print(f"   R: {r['right_seq']}")
+    return best
+
+
 # Main Processing Logic
 if __name__ == '__main__':
     if len(sys.argv) > 1:
@@ -132,6 +352,7 @@ if __name__ == '__main__':
     else:
         gene_ids = input("Enter the Gene IDs (comma-separated): ")
     last_exon_info = main(gene_ids)
+
 
 # Fetch the DNA sequence for the last exon
 if last_exon_info:
@@ -219,13 +440,13 @@ exon_dna_sequence = r.json().get("seq")
 # If the start is greater than the end, print the reverse complement of the extended DNA sequence
 if last_exon_info['end'] < last_exon_info['start']:
         reverse_complement_exon = reverse_complement(exon_dna_sequence)
-        #print("Reverse complement of the Exon sequence:")
+        print("Reverse complement of the Exon sequence:")
         last_exon_seq = reverse_complement_exon
 else:
-        #print(f"DNA sequence for the last exon({last_exon_info['exon_id']}):")
+        print(f"DNA sequence for the last exon({last_exon_info['exon_id']}):")
         last_exon_seq = exon_dna_sequence
 
-#print(last_exon_seq)
+print(last_exon_seq)
 
 # Fetch extended exon sequence (800 bp upstream and downstream)
 if last_exon_info:
@@ -298,13 +519,125 @@ if last_exon_info:
      
     if last_exon_info['end'] < last_exon_info['start']:
         reverse_complement_CRISPRi = reverse_complement(whole_dna_sequence)
-        #print(f"Reverse complement of Whole DNA sequence for the region surrounding the last exon ({last_exon_info['exon_id']}):")
+        print(f"Reverse complement of Whole DNA sequence for the region surrounding the last exon ({last_exon_info['exon_id']}):")
         CRISPRtgSearch = reverse_complement_CRISPRi
     else:
-        #print(f"Whole DNA sequence for the region surrounding the last exon ({last_exon_info['exon_id']}):")
+        print(f"Whole DNA sequence for the region surrounding the last exon ({last_exon_info['exon_id']}):")
         CRISPRtgSearch = whole_dna_sequence  
 
-#print(CRISPRtgSearch)
+print(CRISPRtgSearch)
+
+#PCR Primer Design
+if last_exon_info:
+    chromosome = last_exon_info['chromosome']
+    exon_start = last_exon_info['start']
+    exon_end = last_exon_info['end']
+    upstream_start = exon_end - 750
+    downstream_end = exon_end + 750
+    
+    if exon_end < exon_start:
+        upstream_start = exon_end - 750
+        downstream_end = exon_end + 750
+        #exon_start, exon_end = exon_end, exon_start  # Swap if end is less than start
+    
+    # Print the new coordinates
+    #print(f"New coordinates: Chromosome {chromosome}, Upstream Start {upstream_start}, Downstream End {downstream_end}")
+
+    ensembl_server = "https://rest.ensembl.org"
+    
+    # Fetch the whole sequence including upstream and downstream
+    whole_ext = f"/sequence/region/human/{chromosome}:{upstream_start}..{downstream_end}:1?coord_system_version=GRCh38"
+    headers = {"Content-Type": "application/json"}
+    r_whole = requests.get(ensembl_server + whole_ext, headers=headers)
+    
+    if not r_whole.ok:
+        r_whole.raise_for_status()
+        sys.exit()
+
+    whole_dna_sequence = r_whole.json().get("seq")
+     
+    if last_exon_info['end'] < last_exon_info['start']:
+        rev_PrimerTemplate = reverse_complement(whole_dna_sequence)
+        print(f"Reverse complement of Primer Template ({last_exon_info['exon_id']}):")
+        PrimerTemplate = rev_PrimerTemplate
+    else:
+        print(f"Primer Template ({last_exon_info['exon_id']}):")
+        PrimerTemplate =  whole_dna_sequence
+
+print(PrimerTemplate)
+
+res = primer3.bindings.design_primers(
+    {
+        "SEQUENCE_ID": "MY_GENE",
+        "SEQUENCE_TEMPLATE": PrimerTemplate,
+    },
+    {
+        "PRIMER_OPT_SIZE": 20,
+        "PRIMER_MIN_SIZE": 18,
+        "PRIMER_MAX_SIZE": 25,
+        "PRIMER_OPT_TM": 62.0,
+        "PRIMER_MIN_TM": 60.0,
+        "PRIMER_MAX_TM": 63.0,
+        "PRIMER_MIN_GC": 40.0,
+        "PRIMER_MAX_GC": 60.0,
+        "PRIMER_PRODUCT_SIZE_RANGE": [[1400, 1500]],
+    },
+)
+
+left = res["PRIMER_LEFT_0_SEQUENCE"]
+right = res["PRIMER_RIGHT_0_SEQUENCE"]
+size = res["PRIMER_PAIR_0_PRODUCT_SIZE"]
+
+# Choose & print only the single best primer pair
+best = rank_primer_pairs_with_specificity(
+    res,
+    template_seq=PrimerTemplate,    # same sequence used for design
+    size_range=(1400, 1500),        # keep consistent with Primer3 settings
+    min_perfect_3prime=15,
+    min_identity=0.65,
+    top_k=1
+)
+
+if not best:
+    print("No suitable primer pair found.")
+else:
+    b = best[0]              # best scored pair
+    i = b["rank"]            # Primer3's rank index
+
+    # Pull more info for this pair from the Primer3 result
+    Lseq  = res[f"PRIMER_LEFT_{i}_SEQUENCE"]
+    Rseq  = res[f"PRIMER_RIGHT_{i}_SEQUENCE"]
+    Lstart0, Llen = res[f"PRIMER_LEFT_{i}"]         # [start, length] (0-based)
+    R3_0,   Rlen  = res[f"PRIMER_RIGHT_{i}"]        # [3' end index, length] (0-based)
+    Rstart0 = R3_0 - Rlen + 1
+
+    # 1-based inclusive spans for readability
+    Lspan_1b = f"{Lstart0+1}-{Lstart0+Llen}"
+    Rspan_1b = f"{Rstart0+1}-{R3_0+1}"
+
+    Ltm   = res.get(f"PRIMER_LEFT_{i}_TM")
+    Rtm   = res.get(f"PRIMER_RIGHT_{i}_TM")
+    Lgc   = res.get(f"PRIMER_LEFT_{i}_GC_PERCENT")
+    Rgc   = res.get(f"PRIMER_RIGHT_{i}_GC_PERCENT")
+
+    print("=== BEST PRIMER PAIR ===")
+    print(f"P3 rank      : {i}")
+    print(f"Score        : {b['score']}  (lower is better)")
+    print(f"Product size : {b['product_size']} bp  |  On-target: {'yes' if b['on_target_found'] else 'no'}")
+    print(f"Off-target pairs : {b['offtarget_pairs']}   |   Single-primer amplicons : {b['single_primer_amps']}")
+    print()
+    print(f"Left  (5'→3'): {Lseq}")
+    print(f"  Len/Tm/GC   : {Llen} / {Ltm:.2f} °C / {Lgc:.1f}%")
+    print(f"  Position    : {Lspan_1b}  (1-based)")
+    print()
+    print(f"Right (5'→3'): {Rseq}")
+    print(f"  Len/Tm/GC   : {Rlen} / {Rtm:.2f} °C / {Rgc:.1f}%")
+    print(f"  Position    : {Rspan_1b}  (1-based)")
+
+# Write sequence to file in the current directory
+with open("sequence.fa", "w") as fa_file:
+    fa_file.write(f">{gene_ids}_whole\n")
+    fa_file.write(CRISPRtgSearch + "\n")
 
 # Define the directory where crispor.py is located
 script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the directory of this script
@@ -317,11 +650,6 @@ if not os.path.exists(crispor_script):
     sys.exit(1)
 else:
     print(f"crispor.py found at {crispor_script}")
-
-# Write sequence to file in the current directory
-with open("sequence.fa", "w") as fa_file:
-    fa_file.write(f">{gene_ids}_whole\n")
-    fa_file.write(CRISPRtgSearch + "\n")
 
 # Define the command and arguments for running crispor.py
 crispor_command = [
@@ -425,7 +753,6 @@ try:
     # Remove any rows where the absolute value of 'Distance from Exon' is greater than 23
     df = df[df['Distance from Exon'].abs() <= 100]
 
-
     # Keep only the top 20 entries without sorting
     filtered_df = df.head(20)
 
@@ -441,40 +768,12 @@ try:
         'Distance from Exon'
     ]
 
-    # Ensure numeric values for score columns
-    score_columns = ['mitSpecScore', 'cfdSpecScore', 'Moreno-Mateos-Score', "Doench '16-Score"]
-    for col in score_columns:
-        filtered_df[col] = pd.to_numeric(filtered_df[col], errors='coerce')  # Convert to numeric, set errors to NaN
-
-    # Drop rows where any score is missing (NaN)
-    filtered_df = filtered_df.dropna(subset=score_columns)
-
-    # Normalize scores for fair weighting
-    filtered_df['mitSpecScore_norm'] = (filtered_df['mitSpecScore'] - filtered_df['mitSpecScore'].min()) / (filtered_df['mitSpecScore'].max() - filtered_df['mitSpecScore'].min())
-    filtered_df['cfdSpecScore_norm'] = (filtered_df['cfdSpecScore'] - filtered_df['cfdSpecScore'].min()) / (filtered_df['cfdSpecScore'].max() - filtered_df['cfdSpecScore'].min())
-    filtered_df['Moreno-Mateos-Score_norm'] = (filtered_df['Moreno-Mateos-Score'] - filtered_df['Moreno-Mateos-Score'].min()) / (filtered_df['Moreno-Mateos-Score'].max() - filtered_df['Moreno-Mateos-Score'].min())
-    filtered_df["Doench '16-Score_norm"] = (filtered_df["Doench '16-Score"] - filtered_df["Doench '16-Score"].min()) / (filtered_df["Doench '16-Score"].max() - filtered_df["Doench '16-Score"].min())
-
-    # Define weights: on-target scores have higher weight
-    weight_mitSpecScore = 0.2
-    weight_cfdSpecScore = 0.2
-    weight_MorenoMateos = 0.3  # Higher weight for on-target score
-    weight_Doench16 = 0.3       # Higher weight for on-target score
-
-    # Calculate the weighted combined ranking score
-    filtered_df['combined_score'] = (
-        (filtered_df['mitSpecScore_norm'] * weight_mitSpecScore) +
-        (filtered_df['cfdSpecScore_norm'] * weight_cfdSpecScore) +
-        (filtered_df['Moreno-Mateos-Score_norm'] * weight_MorenoMateos) +
-        (filtered_df["Doench '16-Score_norm"] * weight_Doench16)
-    )
-
     # Check if the DataFrame is empty after filtering
     if filtered_df.empty:
-        print("Error: No valid rows found after processing. Check if all values in score columns are numeric.")
+        print("Error: No valid rows found after processing.")
     else:
-        # Select the row with the highest combined score
-        selected_target = filtered_df.loc[filtered_df['combined_score'].idxmax(), ['targetSeq', 'orientation', 'Distance from Exon']]
+        # Select the first row as the best guide
+        selected_target = filtered_df.iloc[0][['targetSeq', 'orientation', 'Distance from Exon']]
 
         # Extract selected values
         selected_target_seq = selected_target['targetSeq']
@@ -485,6 +784,18 @@ try:
         print(f"Selected target sequence: {selected_target_seq}")
         print(f"Selected orientation: {selected_orientation}")
         print(f"Selected distance from exon: {selected_distance_from_exon}")
+    
+        # Check if the DataFrame is empty after filtering
+    if filtered_df.empty:
+        print("Error: No valid rows found after processing.")
+        selected_scores = {}
+    else:
+        # Select the first row as the best guide
+        selected_target = filtered_df.iloc[0]
+
+        # Extract score columns safely
+        score_columns = ['mitSpecScore', 'cfdSpecScore', 'offtargetCount', 'targetGenomeGeneLocus', "Doench '16-Score", 'Moreno-Mateos-Score', 'Doench-RuleSet3-Score', 'Out-of-Frame-Score', 'Lindel-Score', 'GrafEtAlStatus']
+        selected_scores = {col: selected_target.get(col, 'NA') for col in score_columns}
 
 
 except FileNotFoundError:
@@ -748,7 +1059,7 @@ else:
 
 
 left_arm, _ = find_and_extract_sequence(gdna_sequence, protein_coding_exon, 417, 0)
-print(left_arm)
+#print(left_arm)
 
 # Define the minimum match length as half of the sgRNA sequence length excluding PAM
 min_match_length = len(sgRNA_sequence) // 2
@@ -763,7 +1074,7 @@ def find_partial_sgrna_coordinates_in_exon(exon_sequence, sgrna_sequence, min_ma
 
 # Modify the function to find at least half of the sgRNA sequence in left_arm
 sgrna_in_left_arm_start, sgrna_in_left_arm_end = find_partial_sgrna_coordinates_in_exon(left_arm, sgRNA_core, min_match_length)
-print(sgrna_in_left_arm_start, sgrna_in_left_arm_end)
+#print(sgrna_in_left_arm_start, sgrna_in_left_arm_end)
 
 
 if selected_distance_from_exon >= -3 or (selected_distance_from_exon <= -3 and sgrna_in_left_arm_end is None):
@@ -784,41 +1095,6 @@ if selected_distance_from_exon >= -3 or (selected_distance_from_exon <= -3 and s
     #print(f"Amino acid sequence of area around last exon: {'-'.join(amino_acid_sequence)}")
 
     # Original pathway for non-negative distance from exon
-
-    if is_sgRNA_inverted == "Y":
-        sgRNA_sequence = sgRNA_core + reverse_complement(original_sgRNA[:3])  # Reattach PAM at the end
-    else:
-        sgRNA_sequence = sgRNA_core + original_sgRNA[-3:]
-
-    left_arm, _ = find_and_extract_sequence(gdna_sequence, protein_coding_exon, 417, 0)
-
-    if is_sgRNA_inverted == "Y":
-        _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-    else:
-        _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-    left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-    if is_sgRNA_inverted == "Y":
-        left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", left_arm)
-    else:
-        left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", left_arm)
-    print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-    right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-    if is_sgRNA_inverted == "Y":
-        right_ai1_seq = (
-            right_ai1_template.replace("r", right_arm)
-            .replace("y", original_sgRNA)
-            .replace("x", original_sgRNA[:20])
-        )
-    else:
-        right_ai1_seq = (
-            right_ai1_template.replace("r", right_arm)
-            .replace("y", original_sgRNA)
-            .replace("x", original_sgRNA[:20])
-        )
-    print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-    print(f"Left_arm sequence:\n{left_arm}")
     pass
 
 else:
@@ -827,13 +1103,13 @@ else:
 
     
     if is_sgRNA_inverted == "Y":
-        print(f"main sgRNA_Sequence {original_sgRNA}")
-        print(f"no PAM sgRNA_Sequence {sgRNA_core}")
+        #print(f"main sgRNA_Sequence {original_sgRNA}")
+        #print(f"no PAM sgRNA_Sequence {sgRNA_core}")
         sgRNA_sequence = reverse_complement(original_sgRNA[-3:]) + sgRNA_core   # Reattach PAM at the end
         
     else:
-        print(f"main sgRNA_Sequence {original_sgRNA}")
-        print(f"no PAM sgRNA_Sequence {sgRNA_core}")
+        #print(f"main sgRNA_Sequence {original_sgRNA}")
+        #print(f"no PAM sgRNA_Sequence {sgRNA_core}")
         sgRNA_sequence = sgRNA_core + original_sgRNA[-3:]
 
     print(f"sgRNA_Sequence {sgRNA_sequence}")
@@ -862,22 +1138,25 @@ else:
     
     if sgrna_start is not None:
         print("Testing for modifying PAM")
-        #print(f"sgRNA found at positions {sgrna_start} to {sgrna_end}")
+        print(f"sgRNA found at positions {sgrna_start} to {sgrna_end}")
         sgrna_sequence_found = dna_sequence_trimmed[sgrna_start:sgrna_end]
+        left_arm, _ = find_and_extract_sequence(gdna_sequence, protein_coding_exon, 417, 0)
+        print(f"Base pairs in the sgRNA positions: {sgrna_sequence_found}")
         
-        #print(f"Base pairs in the sgRNA positions: {sgrna_sequence_found}")
+
+        print(f"is_sgRNA_inverted: {is_sgRNA_inverted}")
         if is_sgRNA_inverted == "Y":
             position_1 = codon_order_sequence[sgrna_start]
             position_2 = codon_order_sequence[sgrna_start + 1]
 
             if position_2 == '3' or position_1 == '3':
             
-                #print("Pathway: One or both of the last two bases are in codon position 3.")
+                print("Pathway: One or both of the last two bases are in codon position 3.")
                 left_arm, _ = find_and_extract_sequence(gdna_sequence, protein_coding_exon, 417, 0)
 
                 # Original pathway for non-negative distance from exon
                 left_arm_start, left_arm_end = find_sgrna_coordinates_in_exon(gdna_sequence, left_arm)
-                #print(f"Left arm coordinates in exon: start={left_arm_start}, end={left_arm_end}")
+                print(f"Left arm coordinates in exon: start={left_arm_start}, end={left_arm_end}")
 
                 sgrna_in_left_arm_start, sgrna_in_left_arm_end = find_partial_sgrna_coordinates_in_exon(left_arm, sgRNA_core, min_match_length)
                 print(sgrna_in_left_arm_start, sgrna_in_left_arm_end)
@@ -885,9 +1164,9 @@ else:
                 if position_2 == '3':                        
                         print("Attempting to Edit PAM")
                         print(f"Current left arm sequence: {left_arm}")
-                        #rev_left_arm = reverse_complement(left_arm)
-                        #print(f"rev comp of left arm {rev_left_arm}")
-                        #print(f"{sgrna_in_left_arm_start},{sgrna_in_left_arm_end}")
+                        rev_left_arm = reverse_complement(left_arm)
+                        print(f"rev comp of left arm {rev_left_arm}")
+                        print(f"{sgrna_in_left_arm_start},{sgrna_in_left_arm_end}")
 
                             # To extract the last three coordinates from the sgRNA sequence in the left arm sequence
                         if sgrna_in_left_arm_start is not None and sgrna_in_left_arm_end is not None:
@@ -896,39 +1175,15 @@ else:
                             last_three_bases = left_arm[last_three_start:sgrna_in_left_arm_start-1]
                             print(f"Last codon of sgRNA in left arm: {last_three_bases}")
 
-                            modified_left_arm, verification_status = modify_sgrna_PAM(
+                            if last_three_bases == "TGG":
+                                modified_left_arm, verification_status = modify_sgrna_codons(
+                                dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
+                                )
+                            else:
+                                modified_left_arm, verification_status = modify_sgrna_PAM(
                                 left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
                                 sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
-                            )
-
-                            if is_sgRNA_inverted == "Y":
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-                            else:
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-                            left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-                            if is_sgRNA_inverted == "Y":
-                                left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-                            else:
-                                left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-                            print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-                            right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-                            if is_sgRNA_inverted == "Y":
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
                                 )
-                            else:
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
-                                )
-                            print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-                            print(f"Left_arm sequence:\n{modified_left_arm}")
-
                         else:
                             print("sgRNA sequence not found in the left arm.")
                         
@@ -942,42 +1197,18 @@ else:
                         # Get the last three bases of the sgRNA sequence in the left arm
                         last_three_start = sgrna_in_left_arm_start - 5
                         last_three_bases = left_arm[last_three_start:sgrna_in_left_arm_start - 2]
-                        #print(f"Last three bases of sgRNA in left arm: {last_three_bases}")
+                        print(f"Last three bases of sgRNA in left arm: {last_three_bases}")
 
-                        modified_left_arm, verification_status = modify_sgrna_PAM(
+                        if last_three_bases == "TGG":
+                            modified_left_arm, verification_status = modify_sgrna_codons(
+                                dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
+                                )
+                        else:
+                                modified_left_arm, verification_status = modify_sgrna_PAM(
                         left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
                         sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
                         )
-
-                        if is_sgRNA_inverted == "Y":
-                            _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-                        else:
-                            _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-                        left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-                        if is_sgRNA_inverted == "Y":
-                            left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-                        else:
-                            left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-                        print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-                        right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-                        if is_sgRNA_inverted == "Y":
-                            right_ai1_seq = (
-                                right_ai1_template.replace("r", right_arm)
-                                .replace("y", original_sgRNA)
-                                .replace("x", original_sgRNA[:20])
-                            )
-                        else:
-                            right_ai1_seq = (
-                                right_ai1_template.replace("r", right_arm)
-                                .replace("y", original_sgRNA)
-                                .replace("x", original_sgRNA[:20])
-                            )
-                        print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-                        print(f"Left_arm sequence:\n{modified_left_arm}")
-                
-
+                        
             else:
                 #Start Here
                 print("Pathway: Neither of the last two bases is in codon position 3.")
@@ -989,158 +1220,87 @@ else:
 
                 modified_left_arm, verification_status = modify_sgrna_codons(
                 dna_sequence_trimmed, sgrna_in_left_arm_start, sgrna_in_left_arm_end, codon_order_sequence, left_arm, sgRNA_sequence
-                )
-
-
-                if is_sgRNA_inverted == "Y":
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-                else:
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-                left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-                if is_sgRNA_inverted == "Y":
-                    left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-                else:
-                    left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-                print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-                right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-                if is_sgRNA_inverted == "Y":
-                    right_ai1_seq = (
-                        right_ai1_template.replace("r", right_arm)
-                        .replace("y", original_sgRNA)
-                        .replace("x", original_sgRNA[:20])
-                                )
-                else:
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
-                                )
-                print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-                print(f"Left_arm sequence:\n{modified_left_arm}")
-
-            
+                )            
         else:    
             # Pathway based on codon positions
             position_2 = codon_order_sequence[sgrna_end - 2]
             position_3 = codon_order_sequence[sgrna_end - 1]
+            print(position_2,position_3)
             if position_2 == '3' or position_3 == '3':
 
-                #print("Pathway: One or both of the last two bases are in codon position 3.")
+                print("Pathway: One of the last two bases are in codon position 3.")
                 left_arm, _ = find_and_extract_sequence(gdna_sequence, protein_coding_exon, 417, 0)
 
                 # Original pathway for non-negative distance from exon
                 left_arm_start, left_arm_end = find_sgrna_coordinates_in_exon(gdna_sequence, left_arm)
-                #print(f"Left arm coordinates in exon: start={left_arm_start}, end={left_arm_end}")
+                print(f"Left arm coordinates in exon: start={left_arm_start}, end={left_arm_end}")
 
                 # Find sgRNA amino acids within the left arm sequence
                 sgrna_in_left_arm_start, sgrna_in_left_arm_end = find_sgrna_coordinates_in_exon(left_arm, sgRNA_sequence)
-                #print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
+                print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
                 
                 # Extract amino acid sequence within the left arm coordinates
                 if left_arm_start is not None and left_arm_end is not None:
-                    #left_arm_amino_acids = translate_dna_to_protein(dna_sequence_trimmed[left_arm_start:left_arm_end])
-                    #print(f"Amino acids for left arm: {left_arm_amino_acids}")
+                    left_arm_amino_acids = translate_dna_to_protein(dna_sequence_trimmed[left_arm_start:left_arm_end])
+                    print(f"Amino acids for left arm: {left_arm_amino_acids}")
                     if position_2 == '3':
 
                         # Find sgRNA amino acids within the left arm sequence
                         sgrna_in_left_arm_start, sgrna_in_left_arm_end = find_sgrna_coordinates_in_exon(left_arm, sgRNA_sequence)
-                        #print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
+                        print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
 
-                        #print(f"Current left arm sequence: {left_arm}")
+                        print(f"Current left arm sequence: {left_arm}")
 
                             # To extract the last three coordinates from the sgRNA sequence in the left arm sequence
                         if sgrna_in_left_arm_start is not None and sgrna_in_left_arm_end is not None:
                             # Get the last three bases of the sgRNA sequence in the left arm
                             last_three_start = sgrna_in_left_arm_end - 4
                             last_three_bases = left_arm[last_three_start:sgrna_in_left_arm_end-1]
-                            #print(f"Last codon of sgRNA in left arm: {last_three_bases}")
-                            modified_left_arm, verification_status = modify_sgrna_PAM(
-                                left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
-                                sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
-                            )
+                            print(f"Last codon of sgRNA in left arm: {last_three_bases}")
 
-                            if is_sgRNA_inverted == "Y":
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-                            else:
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-                            left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-                            if is_sgRNA_inverted == "Y":
-                                left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-                            else:
-                                left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-                            print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-                            right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-                            if is_sgRNA_inverted == "Y":
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
+                            if last_three_bases == "TGG":
+                                modified_left_arm, verification_status = modify_sgrna_codons(
+                                    dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
                                 )
                             else:
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
+                                modified_left_arm, verification_status = modify_sgrna_PAM(
+                                    left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
+                                    sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
                                 )
-                            print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-                            print(f"Left_arm sequence:\n{modified_left_arm}")
-
                         else:
                             print("sgRNA sequence not found in the left arm.")
                         
                     else:
                         # Find sgRNA amino acids within the left arm sequence
                         sgrna_in_left_arm_start, sgrna_in_left_arm_end = find_sgrna_coordinates_in_exon(left_arm, sgRNA_sequence)
-                        #print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
+                        print(sgrna_in_left_arm_start,sgrna_in_left_arm_end)
 
-                        #print(f"Current left arm sequence: {left_arm}")
+                        print(f"Current left arm sequence: {left_arm}")
 
                             # To extract the last three coordinates from the sgRNA sequence in the left arm sequence
                         if sgrna_in_left_arm_start is not None and sgrna_in_left_arm_end is not None:
                             # Get the last three bases of the sgRNA sequence in the left arm
                             last_three_start = sgrna_in_left_arm_end - 3
                             last_three_bases = left_arm[last_three_start:sgrna_in_left_arm_end]
-                            #print(f"Last three bases of sgRNA in left arm: {last_three_bases}")
+                            print(f"Last three bases of sgRNA in left arm: {last_three_bases}")
 
-                            modified_left_arm, verification_status = modify_sgrna_PAM(
-                            left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
-                            sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
-                            )
-
-                            if is_sgRNA_inverted == "Y":
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-                            else:
-                                _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-                            left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-                            if is_sgRNA_inverted == "Y":
-                                left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-                            else:
-                                left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-                            print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-                            right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-                            if is_sgRNA_inverted == "Y":
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
+                            if last_three_bases == "TGG":
+                                modified_left_arm, verification_status = modify_sgrna_codons(
+                                    dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
                                 )
                             else:
-                                right_ai1_seq = (
-                                    right_ai1_template.replace("r", right_arm)
-                                    .replace("y", original_sgRNA)
-                                    .replace("x", original_sgRNA[:20])
+                                modified_left_arm, verification_status = modify_sgrna_PAM(
+                                    left_arm, last_three_start, last_three_bases, dna_sequence_trimmed, 
+                                    sgrna_start, sgrna_end, codon_order_sequence, sgRNA_sequence
                                 )
-                            print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-                            print(f"Left_arm sequence:\n{modified_left_arm}")
                 else:
                     print("sgRNA sequence not found in the left arm.")
-        
+            else:
+                print("Pathway: Neither of the last two bases is in codon position 3.")
+
+                modified_left_arm, verification_status = modify_sgrna_codons(
+                    dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
+                )
 
     else:
         print("Pathway: Neither of the last two bases is in codon position 3.")
@@ -1148,36 +1308,255 @@ else:
         modified_left_arm, verification_status = modify_sgrna_codons(
             dna_sequence_trimmed, sgrna_start, sgrna_end, codon_order_sequence, left_arm, sgRNA_sequence
         )
-
-        if is_sgRNA_inverted == "Y":
-            _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-        else:
-            _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
-
-        left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
-        if is_sgRNA_inverted == "Y":
-            left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", modified_left_arm)
-        else:
-            left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", modified_left_arm)
-        print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
-
-        right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
-        if is_sgRNA_inverted == "Y":
-            right_ai1_seq = (
-                right_ai1_template.replace("r", right_arm)
-                .replace("y", original_sgRNA)
-                .replace("x", original_sgRNA[:20])
-            )
-        else:
-            right_ai1_seq = (
-                right_ai1_template.replace("r", right_arm)
-                .replace("y", original_sgRNA)
-                .replace("x", original_sgRNA[:20])
-            )
-        print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
-        print(f"Left_arm sequence:\n{modified_left_arm}")
  
 
-# Print the results
+# Use modified_left_arm if available, otherwise fallback to left_arm
+left_arm_seq = modified_left_arm if 'modified_left_arm' in locals() else left_arm
 
+if is_sgRNA_inverted == "Y":
+    if selected_orientation == "rev":
+        sgRNA_sequence = reverse_complement(sgRNA_sequence)
+        print(f"Rev Compliment of sgRNA {sgRNA_sequence}")
+        _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
+        print(f"Right_arm sequence:\n{right_arm}")
+    else:
+        _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
+        print(f"Right_arm sequence:\n{right_arm}")
+else:
+    _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
+    print(f"Right_arm sequence:\n{right_arm}")
+
+
+left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
+if is_sgRNA_inverted == "Y":
+    left_ai1_seq = left_ai1_template.replace("s", original_sgRNA).replace("n", left_arm_seq)
+else:
+    left_ai1_seq = left_ai1_template.replace("s", reverse_complement(original_sgRNA)).replace("n", left_arm_seq)
+print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
+
+right_ai1_template = "CCTGCGGTGTCTTTGCTTrycatgtGGTTCCATGGTGTAATGGTTAGCACTCTGGACTCTGAATCCAGCGATCCGAGTTCAAATCTCGGTGGAACCTxGTTTTAGAGCTAGAAATAGCAA"
+if is_sgRNA_inverted == "Y":
+    right_ai1_seq = (
+        right_ai1_template.replace("r", right_arm)
+        .replace("y", original_sgRNA)
+        .replace("x", original_sgRNA[:20])
+    )
+else:
+    right_ai1_seq = (
+        right_ai1_template.replace("r", right_arm)
+        .replace("y", original_sgRNA)
+        .replace("x", original_sgRNA[:20])
+    )
+
+
+# Print sequences
+print(f">{gene_name}-Left-AI1\n{left_ai1_seq}")
+print(f">{gene_name}-Right-AI1\n{right_ai1_seq}")
 print(f"Right_arm sequence:\n{right_arm}")
+print(f"Left_arm sequence:\n{left_arm_seq}")
+
+# Ensure the output directory exists
+output_dir = "HDR_arms"
+os.makedirs(output_dir, exist_ok=True)
+
+# ---- helper: extract best pair either from our earlier ranking function or fall back to P3 rank 0 ----
+def get_best_primer_from_res(res: dict):
+    """
+    Returns (index, summary_dict) for the 'best' pair.
+    If a ranking function named rank_primer_pairs_with_specificity exists, uses that (top_k=1).
+    Otherwise falls back to Primer3 rank 0.
+    """
+    try:
+        # Use your BLAST+ specificity ranking if it's defined elsewhere in your script
+        best = rank_primer_pairs_with_specificity(
+            res,
+            template_seq=PrimerTemplate,
+            size_range=(1400, 1500),   # keep consistent with your Primer3 settings
+            min_perfect_3prime=15,
+            min_identity=0.65,
+            top_k=1
+        )
+        if best:
+            b = best[0]
+            i = b["rank"]
+            summary = {
+                "score": b["score"],
+                "product_size": b["product_size"],
+                "on_target": b["on_target_found"],
+                "offtarget_pairs": b["offtarget_pairs"],
+                "single_primer_amplicons": b["single_primer_amps"],
+            }
+            return i, summary
+    except NameError:
+        # ranking function not present — fall through to P3 rank 0
+        pass
+
+    # Fallback: use Primer3 rank 0 only
+    if int(res.get("PRIMER_PAIR_NUM_RETURNED", 0) or 0) == 0:
+        return None, None
+    i = 0
+    summary = {
+        "score": float(res.get(f"PRIMER_PAIR_{i}_PENALTY", 0.0) or 0.0),
+        "product_size": res.get(f"PRIMER_PAIR_{i}_PRODUCT_SIZE"),
+        "on_target": True,      # unknown without BLAST; mark True for fallback
+        "offtarget_pairs": None,
+        "single_primer_amplicons": None,
+    }
+    return i, summary
+
+def _fmt(x, nd=2):
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return "NA" if x is None else str(x)
+
+def _span_1b_left(res, i):
+    try:
+        start0, length = res[f"PRIMER_LEFT_{i}"]
+        return f"{start0+1}-{start0+length}", length
+    except Exception:
+        return "NA", None
+
+def _span_1b_right(res, i):
+    try:
+        end3_0, length = res[f"PRIMER_RIGHT_{i}"]
+        start0 = end3_0 - length + 1
+        return f"{start0+1}-{end3_0+1}", length
+    except Exception:
+        return "NA", None
+
+# Check if the DataFrame is empty after filtering
+if filtered_df.empty:
+    print("Error: No valid rows found after processing.")
+    selected_scores = {}
+else:
+    # Select the first row as the best guide
+    selected_target = filtered_df.iloc[0]
+
+    # Extract key values
+    selected_target_seq = selected_target.get('targetSeq', 'NA')
+    selected_orientation = selected_target.get('orientation', 'NA')
+    selected_distance_from_exon = selected_target.get('Distance from Exon', 'NA')
+
+    # Score columns to display
+    score_columns = [
+        'mitSpecScore',
+        'cfdSpecScore',
+        'offtargetCount',
+        'targetGenomeGeneLocus',
+        "Doench '16-Score",
+        'Moreno-Mateos-Score',
+        'Doench-RuleSet3-Score',
+        'Out-of-Frame-Score',
+        'Lindel-Score',
+        'GrafEtAlStatus'
+    ]
+    selected_scores = {col: selected_target.get(col, 'NA') for col in score_columns}
+
+    # ---- pull best primer pair info (Primer3 + optional BLAST specificity) ----
+    best_idx, best_summary = (None, None)
+    try:
+        best_idx, best_summary = get_best_primer_from_res(res)
+    except Exception as e:
+        print(f"[WARN] Primer best-pair extraction failed: {e}")
+
+    # Build the single TXT output
+    lines = [
+        f"Selected target sequence: {selected_target_seq}",
+        f"Selected orientation: {selected_orientation}",
+        f"Selected distance from exon: {selected_distance_from_exon}",
+        "",
+        "Score summary:"
+    ]
+    lines += [f"- {col}: {selected_scores[col]}" for col in score_columns]
+
+    # HDR arms (FASTA-style headers kept as you had them)
+    lines += [
+        "",
+        f">{gene_name}-Left-AI1",
+        left_ai1_seq,
+        f">{gene_name}-Right-AI1",
+        right_ai1_seq,
+        "",
+        "Left_arm sequence:",
+        left_arm_seq,
+        "",
+        "Right_arm sequence:",
+        right_arm
+    ]
+
+    # ===== ADD: Best primer pair directly in this same file (FASTA + summary) =====
+    lines += ["", "===== Best primer pair ====="]
+    if best_idx is None:
+        lines += ["No primer pairs returned by Primer3."]
+    else:
+        Lseq = res.get(f"PRIMER_LEFT_{best_idx}_SEQUENCE", "NA")
+        Rseq = res.get(f"PRIMER_RIGHT_{best_idx}_SEQUENCE", "NA")
+        Lspan, Llen = _span_1b_left(res, best_idx)
+        Rspan, Rlen = _span_1b_right(res, best_idx)
+        Ltm  = _fmt(res.get(f"PRIMER_LEFT_{best_idx}_TM"))
+        Rtm  = _fmt(res.get(f"PRIMER_RIGHT_{best_idx}_TM"))
+        Lgc  = _fmt(res.get(f"PRIMER_LEFT_{best_idx}_GC_PERCENT"), 1)
+        Rgc  = _fmt(res.get(f"PRIMER_RIGHT_{best_idx}_GC_PERCENT"), 1)
+        prod = res.get(f"PRIMER_PAIR_{best_idx}_PRODUCT_SIZE", "NA")
+        ppen = _fmt(res.get(f"PRIMER_PAIR_{best_idx}_PENALTY"))
+
+        # FASTA-style primer sequences (so they can be copy-pasted for ordering)
+        lines += [
+            f">{gene_name}-BestPrimer-LEFT",
+            Lseq,
+            f">{gene_name}-BestPrimer-RIGHT",
+            Rseq,
+            "",
+            "Best primer summary:",
+            f"- Primer3 rank index: {best_idx}",
+            f"- Product size: {prod} bp   |   Primer3 pair penalty: {ppen}",
+            f"- Left  len/Tm/GC: {Llen} / {Ltm} °C / {Lgc}%   |   Pos (1-based): {Lspan}",
+            f"- Right len/Tm/GC: {Rlen} / {Rtm} °C / {Rgc}%   |   Pos (1-based): {Rspan}",
+        ]
+
+        if isinstance(best_summary, dict):
+            lines += [
+                f"- Specificity combined score: {best_summary.get('score')}",
+                f"- On-target found: {best_summary.get('on_target')}",
+                f"- Off-target pairs: {best_summary.get('offtarget_pairs')}",
+                f"- Single-primer amplicons: {best_summary.get('single_primer_amplicons')}",
+            ]
+
+    # ===== Keep full list of candidates in the same file =====
+    lines += ["", "===== All Primer3 candidate pairs ====="]
+    n_pairs = int(res.get("PRIMER_PAIR_NUM_RETURNED", 0) or 0)
+    if n_pairs == 0:
+        lines += ["(none)"]
+    else:
+        for i in range(n_pairs):
+            Lseq = res.get(f"PRIMER_LEFT_{i}_SEQUENCE", "NA")
+            Rseq = res.get(f"PRIMER_RIGHT_{i}_SEQUENCE", "NA")
+            Lspan, Llen = _span_1b_left(res, i)
+            Rspan, Rlen = _span_1b_right(res, i)
+            Ltm  = _fmt(res.get(f"PRIMER_LEFT_{i}_TM"))
+            Rtm  = _fmt(res.get(f"PRIMER_RIGHT_{i}_TM"))
+            Lgc  = _fmt(res.get(f"PRIMER_LEFT_{i}_GC_PERCENT"), 1)
+            Rgc  = _fmt(res.get(f"PRIMER_RIGHT_{i}_GC_PERCENT"), 1)
+            prod = res.get(f"PRIMER_PAIR_{i}_PRODUCT_SIZE", "NA")
+            ppen = _fmt(res.get(f"PRIMER_PAIR_{i}_PENALTY"))
+
+            lines += [
+                f"[Pair {i}]  product={prod} bp  |  penalty={ppen}",
+                f"  L: {Lseq}",
+                f"     len/tm/gc: {Llen} / {Ltm} °C / {Lgc}%   pos: {Lspan}",
+                f"  R: {Rseq}",
+                f"     len/tm/gc: {Rlen} / {Rtm} °C / {Rgc}%   pos: {Rspan}",
+                ""
+            ]
+
+    output_text = "\n".join(lines)
+
+    # Define the output path (single TXT)
+    txt_path  = os.path.join(output_dir, f"{gene_name}_selected_info.txt")
+
+    # Write the single human-readable TXT (arms + best primer + full list)
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(output_text)
+
+    print(f"\nAll results written to: {txt_path}")
