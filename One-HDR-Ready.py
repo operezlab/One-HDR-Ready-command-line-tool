@@ -532,12 +532,12 @@ if last_exon_info:
     chromosome = last_exon_info['chromosome']
     exon_start = last_exon_info['start']
     exon_end = last_exon_info['end']
-    upstream_start = exon_end - 750
-    downstream_end = exon_end + 750
-    
+    upstream_start = exon_end - 1000
+    downstream_end = exon_end + 1000
+
     if exon_end < exon_start:
-        upstream_start = exon_end - 750
-        downstream_end = exon_end + 750
+        upstream_start = exon_end - 1000
+        downstream_end = exon_end + 1000
         #exon_start, exon_end = exon_end, exon_start  # Swap if end is less than start
     
     # Print the new coordinates
@@ -580,9 +580,11 @@ res = primer3.bindings.design_primers(
         "PRIMER_MAX_TM": 63.0,
         "PRIMER_MIN_GC": 40.0,
         "PRIMER_MAX_GC": 60.0,
-        "PRIMER_PRODUCT_SIZE_RANGE": [[1400, 1500]],
+        "PRIMER_PRODUCT_SIZE_RANGE": [[1400, 2000]],
     },
 )
+
+#print(res)
 
 left = res["PRIMER_LEFT_0_SEQUENCE"]
 right = res["PRIMER_RIGHT_0_SEQUENCE"]
@@ -772,18 +774,23 @@ try:
     if filtered_df.empty:
         print("Error: No valid rows found after processing.")
     else:
-        # Select the first row as the best guide
-        selected_target = filtered_df.iloc[0][['targetSeq', 'orientation', 'Distance from Exon']]
 
-        # Extract selected values
-        selected_target_seq = selected_target['targetSeq']
-        selected_orientation = selected_target['orientation']
-        selected_distance_from_exon = selected_target['Distance from Exon']
+        valid_targets = filtered_df[filtered_df["Distance from Exon"] <= 13]
+        if valid_targets.empty:
+            print("Error: No suitable targets with Distance from Exon <= 13.")
+        else:
+            # Select the first valid row
+            selected_target = valid_targets.iloc[0][['targetSeq', 'orientation', 'Distance from Exon']]
 
-        # Print the selected values
-        print(f"Selected target sequence: {selected_target_seq}")
-        print(f"Selected orientation: {selected_orientation}")
-        print(f"Selected distance from exon: {selected_distance_from_exon}")
+            # Extract selected values
+            selected_target_seq = selected_target['targetSeq']
+            selected_orientation = selected_target['orientation']
+            selected_distance_from_exon = selected_target['Distance from Exon']
+
+            # Print the selected values
+            print(f"Selected target sequence: {selected_target_seq}")
+            print(f"Selected orientation: {selected_orientation}")
+            print(f"Selected distance from exon: {selected_distance_from_exon}")
     
         # Check if the DataFrame is empty after filtering
     if filtered_df.empty:
@@ -806,8 +813,6 @@ except KeyError as e:
     print(f"One or more specified columns are not found in the DataFrame: {e}")
 except Exception as e:
     print(f"An error occurred while processing the DataFrame: {e}")
-
-
 
 # Function to find and extract sequences around the target
 def find_and_extract_sequence(gdna, target, upstream, downstream):
@@ -1032,8 +1037,6 @@ def modify_sgrna_PAM(left_arm, last_three_start, last_three_bases, dna_sequence_
             return modified_left_arm, verification_status
     
     return left_arm, False
-
-
 
 gene_name = gene_ids
 sgRNA_sequence = selected_target_seq
@@ -1313,18 +1316,31 @@ else:
 # Use modified_left_arm if available, otherwise fallback to left_arm
 left_arm_seq = modified_left_arm if 'modified_left_arm' in locals() else left_arm
 
-if is_sgRNA_inverted == "Y":
-    if selected_orientation == "rev":
-        sgRNA_sequence = reverse_complement(sgRNA_sequence)
-        print(f"Rev Compliment of sgRNA {sgRNA_sequence}")
+print(f"sgRNA_sequence {sgRNA_sequence}" )
+
+if is_sgRNA_inverted == "Y" and selected_orientation == "rev":
+    rev_sgRNA_sequence = reverse_complement(sgRNA_sequence)
+    print(f"Rev Compliment of sgRNA {rev_sgRNA_sequence}")
+
+    # Try RC (7 bp) first
+    _, right_arm = find_and_extract_sequence(gdna_sequence, rev_sgRNA_sequence[:7], 0, 321)
+    print(f"Right_arm sequence (RC 7bp):\n{right_arm}")
+
+    # Fallback: forward (18 bp) if no match
+    if right_arm is None:
         _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-        print(f"Right_arm sequence:\n{right_arm}")
-    else:
-        _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:7], 0, 321)
-        print(f"Right_arm sequence:\n{right_arm}")
-else:
+        print(f"Right_arm sequence (FWD 7bp fallback):\n{right_arm}")
+
+elif is_sgRNA_inverted == "Y":
+    # Keep your original behavior for the non-rev case
     _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
     print(f"Right_arm sequence:\n{right_arm}")
+
+else:
+    # Not inverted: original behavior
+    _, right_arm = find_and_extract_sequence(gdna_sequence, sgRNA_sequence[:18], 0, 321)
+    print(f"Right_arm sequence:\n{right_arm}")
+
 
 
 left_ai1_template = "tgctggccttttgctcaggatccsnggatccCaaggcggtggaCTCGA"
@@ -1430,28 +1446,34 @@ if filtered_df.empty:
     print("Error: No valid rows found after processing.")
     selected_scores = {}
 else:
-    # Select the first row as the best guide
-    selected_target = filtered_df.iloc[0]
 
-    # Extract key values
-    selected_target_seq = selected_target.get('targetSeq', 'NA')
-    selected_orientation = selected_target.get('orientation', 'NA')
-    selected_distance_from_exon = selected_target.get('Distance from Exon', 'NA')
+    valid_targets = filtered_df[filtered_df["Distance from Exon"] <= 13].copy()
+    if valid_targets.empty:
+        print("Error: No suitable targets with Distance from Exon <= 13.")
+        selected_scores = {}
+    else:
+        # Select the first valid row
+        selected_target = valid_targets.iloc[0].copy()
 
-    # Score columns to display
-    score_columns = [
-        'mitSpecScore',
-        'cfdSpecScore',
-        'offtargetCount',
-        'targetGenomeGeneLocus',
-        "Doench '16-Score",
-        'Moreno-Mateos-Score',
-        'Doench-RuleSet3-Score',
-        'Out-of-Frame-Score',
-        'Lindel-Score',
-        'GrafEtAlStatus'
-    ]
-    selected_scores = {col: selected_target.get(col, 'NA') for col in score_columns}
+        # Extract key values
+        selected_target_seq = selected_target.get('targetSeq', 'NA')
+        selected_orientation = selected_target.get('orientation', 'NA')
+        selected_distance_from_exon = selected_target.get('Distance from Exon', 'NA')
+
+        # Score columns to display
+        score_columns = [
+            'mitSpecScore',
+            'cfdSpecScore',
+            'offtargetCount',
+            'targetGenomeGeneLocus',
+            'Doench 2016-Score',
+            'Moreno-Mateos-Score',
+            'Doench-RuleSet3-Score',
+            'Out-of-Frame-Score',
+            'Lindel-Score',
+            'GrafEtAlStatus'
+        ]
+        selected_scores = {col: selected_target.get(col, 'NA') for col in score_columns}
 
     # ---- pull best primer pair info (Primer3 + optional BLAST specificity) ----
     best_idx, best_summary = (None, None)
