@@ -1,106 +1,106 @@
 # ============================================================
-# One-HDR-Ready Web Tool Full Installer (Ubuntu / WSL)
+# One-HDR-Ready Web Tool Installer (Python 3.9 venv, local)
 # ============================================================
 
 SHELL := /bin/bash
 .ONESHELL:
 .SHELLFLAGS := -e -o pipefail -c
 
+PYTHON := python3.9
+VENV_DIR := venv
+ACTIVATE := . $(VENV_DIR)/bin/activate
+
 # Default target
 all: install
 
 # ------------------------------------------------------------
-# Step 1. Install Miniconda if missing
+# Step 1. Ensure Python 3.9 and venv are installed
 # ------------------------------------------------------------
-install_miniconda:
-	@echo "🔍 Checking Miniconda..."
-	if ! command -v conda >/dev/null 2>&1; then
-		echo "📦 Installing Miniconda..."
-		wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/Miniconda3-latest-Linux-x86_64.sh
-		bash ~/Miniconda3-latest-Linux-x86_64.sh -b -p $$HOME/miniconda3
-		echo "✅ Miniconda installed."
-	else
-		echo "✅ Miniconda already installed."
+check_python:
+	@echo "Checking for Python 3.9..."
+	if ! command -v $(PYTHON) >/dev/null 2>&1; then \
+		echo "Python 3.9 not found. Installing (requires sudo)..."; \
+		sudo apt update && sudo apt install -y python3.9 python3.9-venv; \
+	else \
+		echo "Python 3.9 found."; \
 	fi
 
 # ------------------------------------------------------------
-# Step 2. Create and activate environment + dependencies
+# Step 2. Create and activate virtual environment
 # ------------------------------------------------------------
-env:
-	@echo "🧱 Setting up conda environment 'crispr-webtool'..."
-	export PATH="$$HOME/miniconda3/bin:$$PATH"
-	eval "$$(conda shell.bash hook)"
-	if conda env list | grep -q "crispr-webtool"; then
-		echo "🔁 Environment already exists. Skipping creation."
-	else
-		conda create -y -n crispr-webtool python=3.9
+venv: check_python
+	@echo "Creating Python 3.9 virtual environment..."
+	if [ ! -d "$(VENV_DIR)" ]; then \
+		$(PYTHON) -m venv $(VENV_DIR); \
+		echo "Virtual environment created at $(VENV_DIR)."; \
+	else \
+		echo "Virtual environment already exists."; \
 	fi
-	conda activate crispr-webtool
-	conda install -y biopython pandas numpy flask gunicorn requests matplotlib git wget curl make
-	pip install primer3-py
+	$(ACTIVATE); pip install --upgrade pip setuptools wheel
 
 # ------------------------------------------------------------
-# Step 3. Install CRISPOR
+# Step 3. Install Python dependencies
 # ------------------------------------------------------------
-crispor:
+deps: venv
+	@echo "Installing Python dependencies..."
+	$(ACTIVATE); pip install biopython pandas numpy flask gunicorn requests matplotlib primer3-py gitpython wget
+
+# ------------------------------------------------------------
+# Step 4. Install CRISPOR (CLI only)
+# ------------------------------------------------------------
+crispor: deps
 	@echo "Installing CRISPOR..."
-	export PATH="$$HOME/miniconda3/bin:$$PATH"
-	eval "$$(conda shell.bash hook)"
-	conda activate crispr-webtool
-	if [ ! -d "$$HOME/crisporWebsite" ]; then
-		git clone https://github.com/maximilianh/crisporWebsite.git $$HOME/crisporWebsite
-	else
-		echo "CRISPOR already cloned."
+	if [ ! -d "crisporWebsite" ]; then \
+		git clone https://github.com/maximilianh/crisporWebsite.git crisporWebsite; \
+	else \
+		echo "CRISPOR already cloned."; \
 	fi
-	@echo "Installing CRISPOR Python dependencies..."
-	pip install biopython numpy scikit-learn pandas twobitreader xlwt keras tensorflow h5py rs3 pytabix lmdbm
-	@echo "CRISPOR CLI setup complete. Skipping 'make' step (web interface not required)."
+	$(ACTIVATE); pip install biopython numpy scikit-learn pandas twobitreader xlwt keras tensorflow h5py rs3 pytabix lmdbm
+	@echo "CRISPOR CLI ready at ./crisporWebsite/crispor.py."
 
 # ------------------------------------------------------------
-# Step 4. Download hg38 genome index
+# Step 5. Download hg38 genome index
 # ------------------------------------------------------------
 hg38:
-	@echo "📥 Downloading hg38 genome index..."
-	mkdir -p $$HOME/crisporGenomes/hg38
-	cd $$HOME/crisporGenomes/hg38
-	for f in hg38.2bit hg38.fa hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do
-		if [ ! -f $$f ]; then
-			echo "Fetching $$f..."
-			wget -q https://crispor.gi.ucsc.edu/genomes/hg38/$$f
-		else
-			echo "$$f already exists."
-		fi
+	@echo "Downloading hg38 genome index..."
+	mkdir -p crisporGenomes/hg38
+	cd crisporGenomes/hg38
+	for f in hg38.2bit hg38.fa hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do \
+		if [ ! -f $$f ]; then \
+			echo "Downloading $$f..."; \
+			wget -q https://crispor.gi.ucsc.edu/genomes/hg38/$$f; \
+		else \
+			echo "$$f already exists."; \
+		fi; \
 	done
 
 # ------------------------------------------------------------
-# Step 5. Clone One-HDR-Ready tool
+# Step 6. Clone One-HDR-Ready tool
 # ------------------------------------------------------------
 onehdr:
 	@echo "Cloning One-HDR-Ready command-line tool..."
-	export PATH="$$HOME/miniconda3/bin:$$PATH"
-	eval "$$(conda shell.bash hook)"
-	conda activate crispr-webtool
-	if [ ! -d "$$HOME/One-HDR-Ready-command-line-tool" ]; then
-		git clone https://github.com/operezlab/One-HDR-Ready-command-line-tool.git $$HOME/One-HDR-Ready-command-line-tool
-	else
-		echo "Repository already cloned."
+	if [ ! -d "One-HDR-Ready-command-line-tool" ]; then \
+		git clone https://github.com/operezlab/One-HDR-Ready-command-line-tool.git One-HDR-Ready-command-line-tool; \
+	else \
+		echo "Repository already cloned."; \
 	fi
-	@echo "One-HDR-Ready cloned successfully. Skipping pip installation (no setup.py found)."
+	@echo "Scripts ready in ./One-HDR-Ready-command-line-tool."
 
 # ------------------------------------------------------------
-# Step 6. Aggregate target
+# Step 7. Aggregate installation
 # ------------------------------------------------------------
-install: install_miniconda env crispor hg38 onehdr
+install: check_python venv deps crispor hg38 onehdr
 	@echo "==========================================================="
-	@echo "🎉 Installation complete!"
-	@echo "To launch the One-HDR-Ready Web Tool, run:"
-	@echo "  conda activate crispr-webtool"
-	@echo "  python3 OneHDRReady.py"
+	@echo "Installation complete."
+	@echo "To use the environment, run:"
+	@echo "  source $(VENV_DIR)/bin/activate"
+	@echo "Then launch the tool with:"
+	@echo "  python One-HDR-Ready-command-line-tool/OneHDRReady.py"
 	@echo "==========================================================="
 
 # ------------------------------------------------------------
 # Optional cleanup
 # ------------------------------------------------------------
 clean:
-	@echo "🧹 Cleaning installations..."
-	rm -rf $$HOME/One-HDR-Ready-command-line-tool $$HOME/crisporWebsite $$HOME/crisporGenomes
+	@echo "Removing local installations..."
+	rm -rf $(VENV_DIR) crisporWebsite crisporGenomes One-HDR-Ready-command-line-tool
