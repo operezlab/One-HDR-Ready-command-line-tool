@@ -1,5 +1,5 @@
 # ============================================================
-# One-HDR-Ready Web Tool Installer (Python 3.9 venv, macOS only)
+# One-HDR-Ready Web Tool Installer (macOS, Python 3.9 venv)
 # ============================================================
 
 SHELL := /bin/bash
@@ -14,24 +14,23 @@ ACTIVATE := . $(VENV_DIR)/bin/activate
 all: install
 
 # ------------------------------------------------------------
-# Step 1. Ensure Python 3.9 and venv are installed via Homebrew
+# Step 1 — Ensure Python 3.9 is installed via Homebrew
 # ------------------------------------------------------------
 check_python:
 	@echo "Checking for Python 3.9..."
 	if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 		echo "Python 3.9 not found. Installing with Homebrew..."; \
 		if ! command -v brew >/dev/null 2>&1; then \
-			echo "Homebrew not found. Please install it first from https://brew.sh"; \
+			echo "Homebrew not found. Install it from https://brew.sh"; \
 			exit 1; \
 		fi; \
 		brew update && brew install python@3.9 && brew link python@3.9 --force --overwrite; \
-		echo "Python 3.9 installed successfully."; \
 	else \
 		echo "Python 3.9 found."; \
 	fi
 
 # ------------------------------------------------------------
-# Step 2. Create and activate virtual environment
+# Step 2 — Create and activate virtual environment
 # ------------------------------------------------------------
 venv: check_python
 	@echo "Creating Python 3.9 virtual environment..."
@@ -44,14 +43,16 @@ venv: check_python
 	$(ACTIVATE); pip install --upgrade pip setuptools wheel
 
 # ------------------------------------------------------------
-# Step 3. Install Python dependencies
+# Step 3 — Install Python dependencies (NO LightGBM)
 # ------------------------------------------------------------
 deps: venv
-	@echo "Installing Python dependencies..."
-	$(ACTIVATE); pip install biopython pandas numpy flask gunicorn requests matplotlib primer3-py gitpython wget
+	@echo "Installing required Python packages..."
+	$(ACTIVATE); \
+	pip install biopython numpy scikit-learn pandas twobitreader xlwt keras tensorflow h5py pytabix matplotlib lmdbm gitpython; \
+	pip install rs3 --no-deps
 
 # ------------------------------------------------------------
-# Step 4. Install CRISPOR (CLI only)
+# Step 4 — Install CRISPOR
 # ------------------------------------------------------------
 crispor: deps
 	@echo "Installing CRISPOR..."
@@ -60,27 +61,26 @@ crispor: deps
 	else \
 		echo "CRISPOR already cloned."; \
 	fi
-	$(ACTIVATE); pip install biopython numpy scikit-learn pandas twobitreader xlwt keras tensorflow h5py rs3 pytabix lmdbm
 	@echo "CRISPOR CLI ready at ./crisporWebsite/crispor.py."
 
 # ------------------------------------------------------------
-# Step 5. Download hg38 genome index
+# Step 5 — Download hg38 genome index (curl version)
 # ------------------------------------------------------------
 hg38:
 	@echo "Downloading hg38 genome index..."
 	mkdir -p crisporGenomes/hg38
-	cd crisporGenomes/hg38
+	cd crisporGenomes/hg38; \
 	for f in hg38.2bit hg38.fa hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do \
 		if [ ! -f $$f ]; then \
 			echo "Downloading $$f..."; \
-			wget -q https://crispor.gi.ucsc.edu/genomes/hg38/$$f; \
+			curl -fsSLO https://crispor.gi.ucsc.edu/genomes/hg38/$$f; \
 		else \
 			echo "$$f already exists."; \
 		fi; \
 	done
 
 # ------------------------------------------------------------
-# Step 6. Clone One-HDR-Ready tool
+# Step 6 — Clone One-HDR-Ready tool
 # ------------------------------------------------------------
 onehdr:
 	@echo "Cloning One-HDR-Ready command-line tool..."
@@ -89,17 +89,19 @@ onehdr:
 	else \
 		echo "Repository already cloned."; \
 	fi
-	@echo "Scripts ready in ./One-HDR-Ready-command-line-tool."
+	@echo "Scripts available in ./One-HDR-Ready-command-line-tool."
 
 # ------------------------------------------------------------
-# Step 7. Aggregate installation
+# Step 7 — Aggregate installation
 # ------------------------------------------------------------
 install: check_python venv deps crispor hg38 onehdr
 	@echo "==========================================================="
-	@echo "Installation complete."
-	@echo "To use the environment, run:"
+	@echo "Installation complete!"
+	@echo ""
+	@echo "To activate the environment, run:"
 	@echo "  source $(VENV_DIR)/bin/activate"
-	@echo "Then launch the tool with:"
+	@echo ""
+	@echo "To launch the One-HDR-Ready tool, run:"
 	@echo "  python One-HDR-Ready-command-line-tool/OneHDRReady.py"
 	@echo "==========================================================="
 
