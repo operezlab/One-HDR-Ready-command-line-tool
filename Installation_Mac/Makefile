@@ -70,7 +70,7 @@ hg38:
 	@echo "Downloading hg38 genome index..."
 	mkdir -p crisporGenomes/hg38
 	cd crisporGenomes/hg38; \
-	for f in hg38.2bit hg38.fa hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do \
+	for f in hg38.2bit hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do \
 		if [ ! -f $$f ]; then \
 			echo "Downloading $$f..."; \
 			curl -fsSLO https://crispor.gi.ucsc.edu/genomes/hg38/$$f; \
