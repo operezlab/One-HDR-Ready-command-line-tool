@@ -57,7 +57,7 @@ deps: venv
 		biopython==1.79 \
 		numpy==1.23.5 \
 		pandas==1.5.3 \
-		scikit-learn==1.2.2 \
+		scikit-learn==1.0.2 \
 		matplotlib==3.7.1 \
 		twobitreader==3.1.7 \
 		xlwt==1.3.0 \
