@@ -12,6 +12,154 @@ ACTIVATE := . $(VENV_DIR)/bin/activate
 
 # Default target
 all: install
+# ============================================================
+# One-HDR-Ready Web Tool Installer (Cross-platform: macOS + Linux)
+# Python 3.9 venv + pinned stable dependencies
+# ============================================================
+
+SHELL := /bin/bash
+.ONESHELL:
+.SHELLFLAGS := -e -o pipefail -c
+
+VENV_DIR := venv
+ACTIVATE := . $(VENV_DIR)/bin/activate
+
+# Detect OS
+UNAME_S := $(shell uname -s)
+
+# ------------------------------------------------------------
+# Default target
+# ------------------------------------------------------------
+all: install
+
+# ------------------------------------------------------------
+# Step 1 — Ensure Python 3.9 is installed
+# ------------------------------------------------------------
+check_python:
+	@echo "Checking for Python 3.9..."
+
+	@if [ "$(UNAME_S)" = "Darwin" ]; then \
+		echo "Detected macOS."; \
+		if ! command -v python3.9 >/dev/null 2>&1; then \
+			echo "Python 3.9 not found. Installing with Homebrew..."; \
+			if ! command -v brew >/dev/null 2>&1; then \
+				echo "Homebrew not installed. Install from https://brew.sh"; \
+				exit 1; \
+			fi; \
+			brew update && brew install python@3.9 && brew link python@3.9 --force --overwrite; \
+		else \
+			echo "Python 3.9 found."; \
+		fi; \
+	elif [ "$(UNAME_S)" = "Linux" ]; then \
+		echo "Detected Linux (Ubuntu/WSL)."; \
+		if ! command -v python3.9 >/dev/null 2>&1; then \
+			echo "Python 3.9 not found. Installing with apt (requires sudo)..."; \
+			sudo apt update && sudo apt install -y python3.9 python3.9-venv; \
+		else \
+			echo "Python 3.9 found."; \
+		fi; \
+	else \
+		echo "Unsupported OS: $(UNAME_S)"; \
+		exit 1; \
+	fi
+
+# ------------------------------------------------------------
+# Step 2 — Create Python 3.9 virtual environment
+# ------------------------------------------------------------
+venv: check_python
+	@echo "Creating Python 3.9 virtual environment..."
+	if [ ! -d "$(VENV_DIR)" ]; then \
+		python3.9 -m venv $(VENV_DIR); \
+		echo "Virtual environment created at $(VENV_DIR)."; \
+	else \
+		echo "Virtual environment already exists."; \
+	fi
+	$(ACTIVATE); pip install --upgrade pip setuptools wheel
+
+# ------------------------------------------------------------
+# Step 3 — Install pinned, stable Python dependencies
+# ------------------------------------------------------------
+deps: venv
+	@echo "Installing pinned Python dependencies..."
+	$(ACTIVATE); \
+	pip install \
+		biopython==1.79 \
+		numpy==1.23.5 \
+		scikit-learn==1.2.2 \
+		pandas==1.5.3 \
+		twobitreader==3.1.7 \
+		xlwt==1.3.0 \
+		keras==2.10.0 \
+		tensorflow-macos==2.10.0 \
+		tensorflow-metal==0.6.0 || true; \
+	pip install \
+		h5py==3.8.0 \
+		pytabix==0.1 \
+		matplotlib==3.7.1 \
+		lmdbm==0.5.0 \
+		gitpython==3.1.40; \
+	pip install rs3==0.1.9 --no-deps
+
+# ------------------------------------------------------------
+# Step 4 — Install CRISPOR
+# ------------------------------------------------------------
+crispor: deps
+	@echo "Installing CRISPOR..."
+	if [ ! -d "crisporWebsite" ]; then \
+		git clone https://github.com/maximilianh/crisporWebsite.git crisporWebsite; \
+	else \
+		echo "CRISPOR already cloned."; \
+	fi
+	@echo "CRISPOR CLI ready at ./crisporWebsite/crispor.py."
+
+# ------------------------------------------------------------
+# Step 5 — Download hg38 genome index (curl version)
+# ------------------------------------------------------------
+hg38:
+	@echo "Downloading hg38 genome index..."
+	mkdir -p crisporGenomes/hg38
+	cd crisporGenomes/hg38; \
+	for f in hg38.2bit hg38.fa hg38.fa.amb hg38.fa.ann hg38.fa.bwt hg38.fa.pac hg38.fa.sa hg38.sizes hg38.segments.bed genomeInfo.tab; do \
+		if [ ! -f $$f ]; then \
+			echo "Downloading $$f..."; \
+			curl -fsSLO https://crispor.gi.ucsc.edu/genomes/hg38/$$f; \
+		else \
+			echo "$$f already exists."; \
+		fi; \
+	done
+
+# ------------------------------------------------------------
+# Step 6 — Clone One-HDR-Ready tool
+# ------------------------------------------------------------
+onehdr:
+	@echo "Cloning One-HDR-Ready command-line tool..."
+	if [ ! -d "One-HDR-Ready-command-line-tool" ]; then \
+		git clone https://github.com/operezlab/One-HDR-Ready-command-line-tool.git One-HDR-Ready-command-line-tool; \
+	else \
+		echo "Repository already cloned."; \
+	fi
+	@echo "Scripts ready in ./One-HDR-Ready-command-line-tool."
+
+# ------------------------------------------------------------
+# Step 7 — Aggregate installation
+# ------------------------------------------------------------
+install: check_python venv deps crispor hg38 onehdr
+	@echo "==========================================================="
+	@echo "Installation complete!"
+	@echo ""
+	@echo "To activate the environment, run:"
+	@echo "  source $(VENV_DIR)/bin/activate"
+	@echo ""
+	@echo "To launch the One-HDR-Ready tool, run:"
+	@echo "  python One-HDR-Ready-command-line-tool/OneHDRReady.py"
+	@echo "==========================================================="
+
+# ------------------------------------------------------------
+# Cleanup
+# ------------------------------------------------------------
+clean:
+	@echo "Removing local installations..."
+	rm -rf $(VENV_DIR) crisporWebsite crisporGenomes One-HDR-Ready-command-line-tool
 
 # ------------------------------------------------------------
 # Step 1 — Ensure Python 3.9 is installed via Homebrew
