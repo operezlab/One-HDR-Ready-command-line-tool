@@ -54,7 +54,7 @@ def main():
         ("Step 1 — Fetch Sequences",
          ["python3", "step1_fetch_sequences.py", gene_id]),
         ("Step 2 — Primer Design + Ranking",
-         ["python3", "step2_primer_design.py"]),
+         ["python3", "step2_design_primers.py"]),
         ("Step 3 — Run CRISPOR",
          ["python3", "step3_run_crispor.py"]),
         ("Step 4 — Build HDR Arms",
