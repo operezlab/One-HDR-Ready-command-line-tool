@@ -17,6 +17,9 @@ install_requirements:
 	@echo ">>> Installing Python dependencies into active conda environment"
 	pip install -r $(REQ_FILE)
 
+	@echo "Installing NCBI BLAST+ ..."
+	conda install -y -c bioconda blast
+
 # ------------------------------------------------------------
 # Install CRISPOR Website
 # ------------------------------------------------------------
