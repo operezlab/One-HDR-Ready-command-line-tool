@@ -1,0 +1,156 @@
+Step 1 — Fetch Sequences
+
+Script: step1_fetch_sequences.py
+Inputs:
+
+Gene Symbol or UniProt ID (e.g., BRCA1, P53, Q9H0H5)
+
+What it does:
+
+Queries Ensembl REST API to retrieve the last exon, genomic coordinates, and strand.
+
+Pulls nucleotide sequences:
+
+Full exon sequence
+
+Nearby genomic region for sgRNA scanning (seq_guide_window)
+
+Region for primer design (seq_primer_template)
+
+Writes FASTA + JSON files for downstream steps.
+
+Outputs (written to results/):
+
+step1_last_exon.json
+
+step1_sequences.json
+
+step1_exon.fa
+
+step1_crispor_input.fa
+
+step1_guide_window.fa
+
+step1_primer_template.fa
+
+Step 2 — Primer Design + Ranking
+
+Script: step2_design_primers.py
+Inputs:
+
+results/step1_primer_template.fa
+
+What it does:
+
+Designs primer pairs using Primer3.
+
+Runs BLAST against the primer template to quantify off-target amplification risk.
+
+Computes a combined score:
+
+Primer3 penalty
+
+Hairpin & complementarity
+
+Off-target amplification
+
+Ranks the best primer pairs.
+
+Outputs:
+
+step2_primers.json — full Primer3 output
+
+step2_best_primers.txt — printed top-ranked primer pairs
+
+Step 3 — Run CRISPOR (Automatic sgRNA Selection)
+
+Script: step3_run_crispor.py
+Inputs:
+
+results/step1_crispor_input.fa
+
+CRISPOR genome installed at: crisporGenomes/
+
+CRISPOR source in: crisporWebsite/
+
+What it does:
+
+Runs CRISPOR programmatically using the local Python interpreter.
+
+Computes:
+
+MitSpec score
+
+CFD specificity
+
+Doench ’16
+
+RuleSet3
+
+Lindel indel frameshift likelihood
+
+Identifies exon boundary and calculates the sgRNA distance from coding edge.
+
+Selects the best sgRNA based on proximity to exon + high Doench score.
+
+Outputs:
+
+step3_crispor_output.tsv
+
+step3_best_sgRNA.json
+
+Step 4 — HDR Arm Builder (Codon-Aware)
+
+Script: step4_build_hdr_arms.py
+Inputs:
+
+results/step1_sequences.json
+
+results/step3_best_sgRNA.json
+
+What it does:
+
+Extracts homology arms from the genomic window.
+
+Handles sgRNA orientation automatically.
+
+Detects whether the sgRNA or PAM affects coding bases.
+
+Performs synonymous codon edits when necessary to break the PAM without altering amino acids.
+
+Builds AI1 template sequences (left and right).
+
+Writes HDR arms in JSON and FASTA format.
+
+Outputs:
+
+step4_hdr_arms.json
+
+step4_hdr_arms.fa
+
+Step 5 — Verification + Summary
+
+Script: step5_output_results.py
+Inputs:
+
+All prior outputs
+
+What it does:
+
+Verifies that:
+
+sgRNA sits correctly relative to exon
+
+PAM edits did not change amino acids
+
+Homology arms meet length expectations
+
+Generates a clean human-readable summary of all design outputs.
+
+Confirms the final HDR donor strategy.
+
+Outputs:
+
+step5_final_summary.json
+
+step5_final_summary.txt
