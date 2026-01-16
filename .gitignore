@@ -1,0 +1,6 @@
+results/
+crisporWebsite/
+crisporGenomes/
+__pycache__/
+*.pyc
+
