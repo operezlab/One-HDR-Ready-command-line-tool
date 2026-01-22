@@ -56,23 +56,6 @@ hg38:
 		fi; \
 	done
 
-# ------------------------------------------------------------
-# Retrain Azimuth models (required for sklearn/numpy compatibility)
-# ------------------------------------------------------------
-azimuth-retrain:
-	@if [ -f "$(AZI_MARKER)" ]; then \
-		echo ">>> Azimuth already trained — skipping."; \
-	else \
-		echo "======================================================="; \
-		echo " Retraining Azimuth models for current environment"; \
-		echo "======================================================="; \
-		if [ ! -d "$(AZI_DIR)" ]; then \
-			echo "ERROR: Azimuth directory not found at $(AZI_DIR)"; \
-			exit 1; \
-		fi; \
-		cd $(AZI_DIR) && $(PYTHON) model_comparison.py && touch $(AZI_MARKER); \
-		echo ">>> Azimuth retraining complete"; \
-	fi
 
 # ------------------------------------------------------------
 # Full installation
