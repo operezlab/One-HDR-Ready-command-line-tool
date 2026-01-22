@@ -39,6 +39,15 @@ crispor:
 	else \
 		echo "CRISPOR already installed — skipping clone."; \
 	fi
+	@echo ">>> Checking CRISPOR macOS binaries"
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		if [ -d "$(CRISPOR_DIR)/bin/Darwin" ] && [ ! -e "$(CRISPOR_DIR)/bin/Darwin-x86_64" ]; then \
+			echo ">>> macOS detected — creating Darwin-x86_64 symlink"; \
+			ln -s Darwin "$(CRISPOR_DIR)/bin/Darwin-x86_64"; \
+		else \
+			echo ">>> Darwin-x86_64 already present or Darwin missing — skipping symlink"; \
+		fi \
+	fi
 
 # ------------------------------------------------------------
 # Install hg38 genome
